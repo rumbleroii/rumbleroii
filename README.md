@@ -1,4 +1,4 @@
-- 👋 Hi, I’m @rumbleroii
+- 👋 Hi, I’m Rithik Marudappa
 - 👀 Web Development and anything that mentions the Web excites me :D
 
 <!---
