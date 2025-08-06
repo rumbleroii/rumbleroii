@@ -3,10 +3,6 @@
 
 <p align="left"> <img src="https://komarev.com/ghpvc/?username=rumbleroii&label=Profile%20views&color=0e75b6&style=flat" alt="rumbleroii" /> </p>
 
-- 🌱 I’m currently learning **React**
-
-- 📝 I regularly write articles on [https://dev.to/_rithuu](https://dev.to/_rithuu)
-
 - 📫 How to reach me **mrithik2024@gmail.com**
 
 <h3 align="left">Connect with me:</h3>
