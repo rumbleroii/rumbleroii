@@ -1,0 +1,35 @@
+import json
+import pathlib
+
+import pytest
+
+from clibridge import BridgeConfig
+
+FAKE_CLI = pathlib.Path(__file__).parent / "fake_cli"
+
+
+@pytest.fixture
+def calls(tmp_path, monkeypatch):
+    """Returns a function that reads what the fake CLIs were called with."""
+    log = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_CLI_LOG", str(log))
+
+    def read():
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    return read
+
+
+@pytest.fixture
+def config(calls):
+    return BridgeConfig(claude_bin=str(FAKE_CLI / "claude"), codex_bin=str(FAKE_CLI / "codex"), timeout=20)
+
+
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    },
+}
