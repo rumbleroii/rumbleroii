@@ -97,6 +97,10 @@ def _doctor(args: argparse.Namespace) -> int:
             except BridgeError as exc:
                 print(f"  ✗ test call failed: {exc}")
                 ok = False
+    if any(type(f).__module__ == "_clibridge_autoload" for f in sys.meta_path):
+        print('✓ auto mode: on. Plain openai / litellm / anthropic code can use model="claude-code" or "codex"')
+    else:
+        print("✗ auto mode: off (CLIBRIDGE_AUTOLOAD=0, or clibridge isn't pip-installed in this Python)")
     if not args.ping:
         print("Run `clibridge doctor --ping` to make a tiny test call through each CLI.")
     return 0 if ok else 1

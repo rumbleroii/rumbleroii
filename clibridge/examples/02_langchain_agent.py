@@ -1,9 +1,8 @@
-"""LangChain + LangGraph agent with a tool.  pip install langgraph"""
+"""Plain LangChain + LangGraph agent with a tool.  pip install langgraph"""
 
 from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
-
-from clibridge.langchain import ChatClaudeCode  # or ChatCodex
 
 
 @tool
@@ -12,6 +11,7 @@ def get_weather(city: str) -> str:
     return f"It's 21C and sunny in {city}."
 
 
-agent = create_react_agent(ChatClaudeCode(model="sonnet"), [get_weather])
+llm = ChatOpenAI(model="claude-code/sonnet")
+agent = create_react_agent(llm, [get_weather])
 result = agent.invoke({"messages": [("user", "What's the weather in Lisbon?")]})
 print(result["messages"][-1].content)

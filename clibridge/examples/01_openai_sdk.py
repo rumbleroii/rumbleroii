@@ -1,8 +1,8 @@
-"""OpenAI SDK: change one import and it runs on your Claude Code / Codex subscription."""
+"""Plain OpenAI SDK code. The only special thing is the model name."""
 
-from clibridge import OpenAI  # instead of: from openai import OpenAI
+from openai import OpenAI
 
-client = OpenAI()
+client = OpenAI()  # no API key needed for clibridge models
 
 reply = client.chat.completions.create(
     model="claude-code",  # or "claude-code/opus", "codex", ...

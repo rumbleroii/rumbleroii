@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
 
 [project]
 name = "clibridge"
@@ -22,8 +22,17 @@ dev = ["clibridge[all]", "pytest>=8", "langgraph", "openai-agents"]
 [project.scripts]
 clibridge = "clibridge.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/clibridge"]
+
+# clibridge.pth runs _clibridge_autoload at Python startup, which lets plain
+# openai / anthropic / litellm code use clibridge models without importing clibridge.
+[tool.hatch.build.targets.wheel.force-include]
+"src/clibridge.pth" = "clibridge.pth"
+"src/_clibridge_autoload.py" = "_clibridge_autoload.py"
+
+[tool.hatch.build.targets.wheel.force-include-editable]
+"src/clibridge.pth" = "clibridge.pth"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

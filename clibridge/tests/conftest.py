@@ -1,5 +1,10 @@
 import json
+import os
 import pathlib
+
+# The SDK tests below check the in-process clients and the HTTP server themselves,
+# so keep the startup hook out of the way (test_autoload.py covers it in subprocesses).
+os.environ["CLIBRIDGE_AUTOLOAD"] = "0"
 
 import pytest
 

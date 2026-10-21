@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 CLAUDE_ALIASES = ("fable", "opus", "sonnet", "haiku")
 _CLAUDE_BACKENDS = ("claude", "claude-code", "claude-cli")
@@ -51,6 +51,32 @@ class BridgeConfig:
         self.slots = threading.BoundedSemaphore(max(1, self.max_concurrency))
 
 
+def aliases() -> Dict[str, str]:
+    """Your own model names, from ``CLIBRIDGE_ALIASES="inhouse=claude-code/sonnet,cheap=codex"``."""
+    out = {}
+    for item in (_env("CLIBRIDGE_ALIASES") or "").split(","):
+        name, sep, target = item.partition("=")
+        if sep and name.strip() and target.strip():
+            out[name.strip()] = target.strip()
+    return out
+
+
+def is_bridge_model(name: Optional[str]) -> bool:
+    """True for names that explicitly ask for a CLI (``claude-code``, ``codex/gpt-5``, an alias...).
+
+    Used by the startup hook to decide which SDK requests to take over, so
+    names of real API models (``gpt-4o``, ``claude-sonnet-4-5``) are never matched.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if name in aliases():
+        return True
+    base = name.partition("/")[0].lower()
+    if base.endswith("-agent"):
+        base = base[: -len("-agent")]
+    return base in _CLAUDE_BACKENDS or base in _CODEX_BACKENDS
+
+
 @dataclass(frozen=True)
 class Route:
     backend: str  # "claude" or "codex"
@@ -61,6 +87,7 @@ class Route:
 def resolve_model(name: Optional[str], default_backend: str = "claude") -> Route:
     """Map the ``model`` field of a request to a CLI backend and model.
 
+    * Names from ``CLIBRIDGE_ALIASES`` are replaced by their target first.
     * ``claude-code``, ``claude-code/opus``, ``codex``, ``codex/gpt-5-codex``: explicit.
     * ``claude-code-agent[/model]``, ``codex-agent[/model]``: agent mode.
     * ``sonnet``, ``claude-sonnet-4-5``, ``anthropic/claude-3-opus``: Claude, by family alias.
@@ -68,6 +95,9 @@ def resolve_model(name: Optional[str], default_backend: str = "claude") -> Route
     * Anything else goes to ``default_backend`` with its default model.
     """
     name = (name or "").strip()
+    alias = aliases().get(name)
+    if alias and alias != name:
+        return resolve_model(alias, default_backend)
     head, _, tail = name.partition("/")
     base = head.lower()
     tail = tail.strip() or None

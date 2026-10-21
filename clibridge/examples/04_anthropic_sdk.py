@@ -1,11 +1,11 @@
-"""Anthropic SDK: change one import."""
+"""Plain Anthropic SDK code."""
 
-from clibridge import Anthropic  # instead of: from anthropic import Anthropic
+from anthropic import Anthropic
 
 client = Anthropic()
 
 with client.messages.stream(
-    model="claude-sonnet",  # any Claude name works: it's mapped to opus / sonnet / haiku
+    model="claude-code/sonnet",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Write a limerick about debugging."}],
 ) as stream:

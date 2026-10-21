@@ -1,13 +1,9 @@
-"""LiteLLM: register the providers once, then use "claude-code/<model>" or "codex/<model>"."""
+"""Plain LiteLLM code."""
 
 import litellm
 
-import clibridge.litellm
-
-clibridge.litellm.register()
-
 reply = litellm.completion(
-    model="claude-code/sonnet",  # or "codex/default", "claude-code/default", ...
+    model="claude-code",  # or "claude-code/sonnet", "codex", "codex/gpt-5-codex"
     messages=[{"role": "user", "content": "Give me three fun facts about octopuses."}],
 )
 print(reply.choices[0].message.content)
