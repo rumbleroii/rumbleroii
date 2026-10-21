@@ -16,7 +16,7 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 from .app import App
-from .config import BridgeConfig, aliases, is_bridge_model
+from .config import BridgeConfig, is_bridge_model
 from .transport import sdk_httpx, transports_for
 
 PLACEHOLDER_KEY = "clibridge-no-key"
@@ -138,37 +138,10 @@ def patch_litellm() -> None:
 
     from .litellm import PROVIDERS, register
 
-    if not any(p.get("provider") in PROVIDERS for p in litellm.custom_provider_map):
-        register()
-    # Let a bare "claude-code" / "codex" (or an alias) work without a "provider/" prefix.
-    names = {p: f"{p}/default" for p in PROVIDERS}
-    for alias, target in aliases().items():
-        names[alias] = target if "/" in target else f"{target}/default"
-    for name, target in names.items():
-        litellm.model_alias_map.setdefault(name, target)
-    _resolve_aliases_in_provider_lookup(set(names))
-
-
-def _resolve_aliases_in_provider_lookup(names: set) -> None:
-    """LiteLLM looks up the provider of the raw model name before applying aliases, and
-    prints a "Provider List" banner when that fails. Resolve our aliases in that lookup."""
-    try:
-        from litellm.litellm_core_utils import get_llm_provider_logic as logic
-    except ImportError:
-        return
-    original = logic.get_llm_provider
-    if getattr(original, "_clibridge", False):
-        return
-    import litellm
-
-    @functools.wraps(original)
-    def get_llm_provider(model: Any, *args: Any, **kwargs: Any):
-        if isinstance(model, str) and model in names:
-            model = litellm.model_alias_map.get(model, model)
-        return original(model, *args, **kwargs)
-
-    get_llm_provider._clibridge = True  # type: ignore[attr-defined]
-    logic.get_llm_provider = get_llm_provider
+    register()
+    # Let a bare "claude-code" / "codex" work without a "provider/model" suffix.
+    for name in PROVIDERS:
+        litellm.model_alias_map.setdefault(name, f"{name}/default")
 
 
 def patch_langchain_openai() -> None:

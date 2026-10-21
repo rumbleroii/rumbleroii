@@ -13,6 +13,6 @@ import os
 import urllib.request
 
 url = os.environ.get("OPENAI_BASE_URL", "http://localhost:8787/v1") + "/chat/completions"
-body = {"model": "clibridge", "messages": [{"role": "user", "content": "Say hello!"}]}
+body = {"model": "claude-code", "messages": [{"role": "user", "content": "Say hello!"}]}
 request = urllib.request.Request(url, json.dumps(body).encode(), {"content-type": "application/json"})
 print(json.load(urllib.request.urlopen(request))["choices"][0]["message"]["content"])

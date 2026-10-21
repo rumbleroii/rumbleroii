@@ -72,7 +72,7 @@ class ChatJob:
         messages = request.get("messages")
         if not isinstance(messages, list) or not messages:
             raise BridgeError("`messages` must be a non-empty list", status=400)
-        route = resolve_model(request.get("model"), config.default_backend, config.model)
+        route = resolve_model(request.get("model"), config.default_backend)
         self.backend = route.backend
 
         tools = function_tools(request)
@@ -107,8 +107,10 @@ class ChatJob:
         else:
             self.mode = "text"
 
-        stop = request.get("stop")
-        self.stop = [stop] if isinstance(stop, str) else list(stop or [])
+        # Parameters the CLIs have no equivalent for (max_tokens, temperature, stop, ...) are ignored.
+        self.deltas = bool(request.get("stream")) and self.mode == "text"  # yield text as it arrives
+        self.final: Optional[Final] = None
+        self.streamed = self.thought = False
         max_turns = request.get("max_turns")
         self.spec = RunSpec(
             backend=self.backend,
@@ -119,12 +121,40 @@ class ChatJob:
             json_schema=schema,
             agent=bool(request.get("agent", route.agent)),
             cwd=request.get("cwd"),
-            effort=request.get("reasoning_effort") or (request.get("reasoning") or {}).get("effort") or config.effort,
+            effort=request.get("reasoning_effort") or (request.get("reasoning") or {}).get("effort"),
             max_turns=int(max_turns) if max_turns else None,
-            stream=bool(request.get("stream")) and self.mode == "text",
+            stream=self.deltas,
         )
 
-    def result(self, final: Optional[Final], streamed: bool) -> ChatResult:
+    def handle(self, event: Any) -> List[ChatItem]:
+        """Process one CLI event; returns the items to yield to the caller."""
+        if isinstance(event, TextDelta):
+            if self.deltas:
+                self.streamed = True
+                return [event.text]
+        elif isinstance(event, ThinkingDelta):
+            if self.deltas:
+                self.thought = True
+                return [Thinking(event.text)]
+        elif isinstance(event, ToolActivity):
+            log.info("%s ▸ %s %s", self.backend, event.name, event.detail)
+        elif isinstance(event, Final):
+            self.final = event
+        return []
+
+    def finish(self) -> List[ChatItem]:
+        """The items to yield once the CLI is done."""
+        result = self.result()
+        result.reasoning_streamed = self.thought
+        items: List[ChatItem] = []
+        if self.deltas and not self.streamed and result.content:
+            result.streamed = True
+            items.append(result.content)
+        items.append(result)
+        return items
+
+    def result(self) -> ChatResult:
+        final = self.final
         if final is None:
             raise BridgeError(f"{self.backend} produced no result")
         content: Optional[str] = final.text
@@ -138,10 +168,6 @@ class ChatJob:
             data = final.structured if final.structured is not None else extract_json(final.text)
             if data is not None:
                 content = json.dumps(data, ensure_ascii=False)
-        elif self.stop and not streamed:
-            cut = min((i for i in (content.find(s) for s in self.stop if s) if i >= 0), default=-1)
-            if cut >= 0:
-                content = content[:cut]
 
         if calls:
             finish = "tool_calls"
@@ -161,67 +187,37 @@ class ChatJob:
             cached_tokens=final.cached_tokens,
             reasoning=final.reasoning,
             reasoning_tokens=final.reasoning_tokens,
-            streamed=streamed,
+            streamed=self.streamed,
             meta=meta,
         )
-
-
-def _log_activity(backend: str, event: ToolActivity) -> None:
-    log.info("%s ▸ %s %s", backend, event.name, event.detail)
 
 
 def iter_chat(request: Dict[str, Any], config: Optional[BridgeConfig] = None) -> Iterator[ChatItem]:
     """Yield text deltas (str) and Thinking items when ``request["stream"]`` is set, then one ChatResult."""
     config = config or BridgeConfig()
     job = ChatJob(request, config)
-    final: Optional[Final] = None
-    streamed = thought = False
-    for event in runner.run(job.spec, config):
-        if isinstance(event, TextDelta):
-            if job.spec.stream:
-                streamed = True
-                yield event.text
-        elif isinstance(event, ThinkingDelta):
-            if job.spec.stream:
-                thought = True
-                yield Thinking(event.text)
-        elif isinstance(event, ToolActivity):
-            _log_activity(job.backend, event)
-        elif isinstance(event, Final):
-            final = event
-    result = job.result(final, streamed)
-    result.reasoning_streamed = thought
-    if job.spec.stream and not streamed and result.content:
-        result.streamed = True
-        yield result.content
-    yield result
+    events = runner.run(job.spec, config)
+    try:
+        for event in events:
+            yield from job.handle(event)
+    finally:
+        events.close()  # stops the CLI if the caller stops reading
+    yield from job.finish()
 
 
 async def aiter_chat(request: Dict[str, Any], config: Optional[BridgeConfig] = None) -> AsyncIterator[ChatItem]:
     """Async version of :func:`iter_chat`."""
     config = config or BridgeConfig()
     job = ChatJob(request, config)
-    final: Optional[Final] = None
-    streamed = thought = False
-    async for event in runner.arun(job.spec, config):
-        if isinstance(event, TextDelta):
-            if job.spec.stream:
-                streamed = True
-                yield event.text
-        elif isinstance(event, ThinkingDelta):
-            if job.spec.stream:
-                thought = True
-                yield Thinking(event.text)
-        elif isinstance(event, ToolActivity):
-            _log_activity(job.backend, event)
-        elif isinstance(event, Final):
-            final = event
-    result = job.result(final, streamed)
-    result.reasoning_streamed = thought
-    if job.spec.stream and not streamed and result.content:
-        result.streamed = True
-        yield result.content
-    yield result
+    events = runner.arun(job.spec, config)
+    try:
+        async for event in events:
+            for item in job.handle(event):
+                yield item
+    finally:
+        await events.aclose()
+    for item in job.finish():
+        yield item
 
 
 def complete_chat(request: Dict[str, Any], config: Optional[BridgeConfig] = None) -> ChatResult:

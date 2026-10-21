@@ -114,9 +114,12 @@ def test_json_schema_response_format(config, calls):
     assert calls()[-1]["schema"] is None
 
 
-def test_stop_sequences_truncate(config):
-    result = complete_chat({"model": "claude-code", "messages": user("abc"), "stop": [":"]}, config)
-    assert result.content == "pong from claude-default"
+def test_parameters_the_clis_lack_are_ignored(config, calls):
+    request = {"model": "claude-code", "messages": user("abc"), "stop": [":"], "max_tokens": 1,
+               "temperature": 0.1, "top_p": 0.5, "n": 3, "seed": 7}
+    result = complete_chat(request, config)
+    assert (result.content, result.finish_reason) == ("pong from claude-default: abc", "stop")
+    assert not any(flag in calls()[0]["argv"] for flag in ("--temperature", "--max-tokens", "--stop"))
 
 
 def test_images_are_forwarded(config, calls):

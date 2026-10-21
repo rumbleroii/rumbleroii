@@ -3,7 +3,7 @@
 import litellm
 
 reply = litellm.completion(
-    model="clibridge",  # the real model comes from CLIBRIDGE_MODEL in your .env
+    model="claude-code",  # or "claude-code/fable", "codex", "codex/gpt-5.5", ...
     messages=[{"role": "user", "content": "Give me three fun facts about octopuses."}],
 )
 print(reply.choices[0].message.content)

@@ -51,12 +51,10 @@ def test_codex_effort_levels(config, calls, effort, sent):
     assert argv[argv.index("--config") + 1] == f"model_reasoning_effort={json.dumps(sent)}"
 
 
-def test_default_effort_from_config(config, calls):
-    config.effort = "medium"
+def test_no_effort_means_the_cli_default(config, calls):
     complete_chat(ask("hi", model="claude-code"), config)
-    complete_chat(ask("hi", model="claude-code", reasoning_effort="low"), config)
-    efforts = [c["argv"][c["argv"].index("--effort") + 1] for c in calls()]
-    assert efforts == ["medium", "low"]
+    complete_chat(ask("hi", model="codex"), config)
+    assert "--effort" not in calls()[0]["argv"] and "--config" not in calls()[1]["argv"]
 
 
 def test_rejected_optional_flag_is_retried_and_remembered(config, calls, monkeypatch):
@@ -192,11 +190,14 @@ def test_litellm_reasoning(config, calls):
     clibridge.litellm.register(config)
     try:
         reply = litellm.completion(model="claude-code/default", messages=[{"role": "user", "content": "THINK l"}],
-                                   extra_body={"reasoning_effort": "high"})
+                                   reasoning_effort="high")
         assert reply.choices[0].message.reasoning_content == "Considering: THINK l"
-        argv = calls()[0]["argv"]
-        assert argv[argv.index("--effort") + 1] == "high"
-        chunks = litellm.completion(model="clibridge/default", messages=[{"role": "user", "content": "THINK m"}],
+        litellm.completion(model="codex/default", messages=[{"role": "user", "content": "x"}],
+                           thinking={"type": "enabled", "budget_tokens": 20000})
+        claude_argv, codex_argv = calls()[0]["argv"], calls()[1]["argv"]
+        assert claude_argv[claude_argv.index("--effort") + 1] == "high"
+        assert codex_argv[codex_argv.index("--config") + 1] == 'model_reasoning_effort="high"'
+        chunks = litellm.completion(model="claude-code/default", messages=[{"role": "user", "content": "THINK m"}],
                                     stream=True)
         assert "".join(c.choices[0].delta.content or "" for c in chunks) == "pong from claude-default: THINK m"
     finally:

@@ -9,7 +9,7 @@ from openai import OpenAI
 
 # OpenAI style: reasoning_effort in, message.reasoning_content out.
 reply = OpenAI().chat.completions.create(
-    model="clibridge",
+    model="claude-code",
     reasoning_effort="high",  # none, minimal, low, medium, high, xhigh, max
     messages=[{"role": "user", "content": "Is 391 a prime number?"}],
 )
@@ -19,7 +19,7 @@ print("Answer:  ", message.content)
 
 # Anthropic style: thinking={...} in, thinking blocks out.
 answer = Anthropic().messages.create(
-    model="clibridge",
+    model="claude-code",
     max_tokens=16000,
     thinking={"type": "enabled", "budget_tokens": 10000},
     messages=[{"role": "user", "content": "Is 323 a prime number?"}],

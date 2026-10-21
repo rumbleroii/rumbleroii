@@ -6,15 +6,14 @@
     clibridge.litellm.register()
     litellm.completion(model="claude-code/sonnet", messages=[{"role": "user", "content": "hi"}])
 
-Providers: ``clibridge``, ``claude-code``, ``claude-code-agent``, ``codex``, ``codex-agent``.
+Providers: ``claude-code``, ``claude-code-agent``, ``codex``, ``codex-agent``.
 The part after the slash is the CLI model (``default`` for the CLI's default).
-
-LiteLLM rejects ``reasoning_effort`` for custom providers, so set the thinking level
-with ``CLIBRIDGE_EFFORT`` or ``extra_body={"reasoning_effort": "high"}``.
+The thinking level comes from ``reasoning_effort`` or ``thinking``, like any other provider.
 """
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Dict, Iterator, List, Optional
 
 import litellm
@@ -23,13 +22,16 @@ from litellm.types.utils import ModelResponse
 
 from . import openai_api
 from .config import BridgeConfig
+from .anthropic_api import thinking_effort
 from .core import ChatItem, Thinking, aiter_chat, acomplete_chat, complete_chat, iter_chat
 from .errors import BridgeError
 
-PROVIDERS = ("clibridge", "claude-code", "claude-code-agent", "codex", "codex-agent")
-_PARAMS = ("tools", "tool_choice", "parallel_tool_calls", "response_format", "stop", "reasoning_effort",
+PROVIDERS = ("claude-code", "claude-code-agent", "codex", "codex-agent")
+_PARAMS = ("tools", "tool_choice", "parallel_tool_calls", "response_format", "reasoning_effort",
            "functions", "function_call")
-_EXTRA = ("agent", "cwd", "max_turns", "reasoning_effort")
+# LiteLLM drops these for providers it doesn't know; we take them (see _pass_thinking_params).
+_THINKING_PARAMS = ("reasoning_effort", "thinking")
+_EXTRA = ("agent", "cwd", "max_turns")
 
 
 def _chunk(text: str = "", tool_use: Any = None, finish: str = "", usage: Any = None) -> Dict[str, Any]:
@@ -72,6 +74,8 @@ class CLIBridgeLLM(CustomLLM):
             "stream": stream,
         }
         request.update({k: params[k] for k in _PARAMS if k in params})
+        if "reasoning_effort" not in request and thinking_effort(params.get("thinking")):
+            request["reasoning_effort"] = thinking_effort(params["thinking"])
         extra = params.get("extra_body") or {}
         request.update({k: extra[k] for k in _EXTRA if k in extra})
         return request
@@ -116,3 +120,25 @@ def register(config: Optional[BridgeConfig] = None) -> None:
     litellm.custom_provider_map = existing + [
         {"provider": name, "custom_handler": CLIBridgeLLM(name, config)} for name in PROVIDERS
     ]
+    _pass_thinking_params()
+
+
+def _pass_thinking_params() -> None:
+    """Hand reasoning_effort / thinking to our providers instead of letting LiteLLM reject or drop them."""
+    from litellm import main
+
+    original = main.get_optional_params
+    if getattr(original, "_clibridge", False):
+        return
+
+    @functools.wraps(original)
+    def get_optional_params(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        if kwargs.get("custom_llm_provider") not in PROVIDERS:
+            return original(*args, **kwargs)
+        thinking = {k: kwargs.pop(k) for k in _THINKING_PARAMS if kwargs.get(k) is not None}
+        params = original(*args, **kwargs)
+        params.update(thinking)
+        return params
+
+    get_optional_params._clibridge = True  # type: ignore[attr-defined]
+    main.get_optional_params = get_optional_params

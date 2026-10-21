@@ -104,9 +104,7 @@ def to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         request["tool_choice"] = "none"
     if choice.get("disable_parallel_tool_use"):
         request["parallel_tool_calls"] = False
-    if body.get("stop_sequences"):
-        request["stop"] = body["stop_sequences"]
-    effort = (body.get("output_config") or {}).get("effort") or _thinking_effort(body.get("thinking"))
+    effort = (body.get("output_config") or {}).get("effort") or thinking_effort(body.get("thinking"))
     if effort:
         request["reasoning_effort"] = effort
     for key in ("agent", "cwd", "max_turns"):
@@ -115,7 +113,7 @@ def to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
     return request
 
 
-def _thinking_effort(thinking: Any) -> Optional[str]:
+def thinking_effort(thinking: Any) -> Optional[str]:
     """Map the ``thinking`` parameter to a thinking level (the CLIs take levels, not token budgets)."""
     if not isinstance(thinking, dict):
         return None

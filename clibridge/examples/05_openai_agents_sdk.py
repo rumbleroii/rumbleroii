@@ -11,5 +11,5 @@ def add(a: int, b: int) -> int:
     return a + b
 
 
-agent = Agent(name="Math helper", instructions="Use the add tool for arithmetic.", model="clibridge", tools=[add])
+agent = Agent(name="Math helper", instructions="Use the add tool for arithmetic.", model="claude-code", tools=[add])
 print(Runner.run_sync(agent, "What is 1234 + 4321?").final_output)

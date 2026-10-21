@@ -11,7 +11,7 @@ def get_weather(city: str) -> str:
     return f"It's 21C and sunny in {city}."
 
 
-llm = ChatOpenAI(model="clibridge")
+llm = ChatOpenAI(model="claude-code")
 agent = create_react_agent(llm, [get_weather])
 result = agent.invoke({"messages": [("user", "What's the weather in Lisbon?")]})
 print(result["messages"][-1].content)

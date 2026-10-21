@@ -8,7 +8,6 @@ from typing import Any, Dict, List
 from .core import ChatItem, ChatResult, Thinking, new_id
 
 MODELS = [
-    "clibridge",
     "claude-code",
     "claude-code/fable",
     "claude-code/opus",

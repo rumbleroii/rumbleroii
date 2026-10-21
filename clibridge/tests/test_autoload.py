@@ -87,16 +87,6 @@ def test_plain_langchain_chat_openai():
     """) == ["pong from claude-default: lc"]
 
 
-def test_aliases():
-    pytest.importorskip("litellm")
-    assert output("""
-        import litellm
-        from openai import OpenAI
-        print(OpenAI().chat.completions.create(model="inhouse", messages=[{"role": "user", "content": "1"}]).choices[0].message.content)
-        print(litellm.completion(model="inhouse", messages=[{"role": "user", "content": "2"}]).choices[0].message.content)
-    """, CLIBRIDGE_ALIASES="inhouse=claude-code/haiku") == ["pong from haiku: 1", "pong from haiku: 2"]
-
-
 def test_other_models_still_reach_the_real_endpoint():
     pytest.importorskip("openai")
     seen = []
@@ -138,12 +128,12 @@ def test_missing_key_still_errors_without_the_hook():
     assert proc.returncode != 0 and "OPENAI_API_KEY" in proc.stderr
 
 
-def test_clibridge_model_from_dotenv(tmp_path):
+def test_plain_litellm_with_reasoning_effort():
     pytest.importorskip("litellm")
-    (tmp_path / ".env").write_text("CLIBRIDGE_MODEL=codex/gpt-5.5\n")
     assert output("""
         import litellm
-        from openai import OpenAI
-        print(OpenAI().chat.completions.create(model="clibridge", messages=[{"role": "user", "content": "1"}]).choices[0].message.content)
-        print(litellm.completion(model="clibridge", messages=[{"role": "user", "content": "2"}]).choices[0].message.content)
-    """, cwd=tmp_path, CLIBRIDGE_ENV_FILE="") == ["pong from gpt-5.5: 1", "pong from gpt-5.5: 2"]
+        reply = litellm.completion(model="claude-code", reasoning_effort="high",
+                                   messages=[{"role": "user", "content": "THINK hard"}])
+        print(reply.choices[0].message.content)
+        print(reply.choices[0].message.reasoning_content)
+    """) == ["pong from claude-default: THINK hard", "Considering: THINK hard"]

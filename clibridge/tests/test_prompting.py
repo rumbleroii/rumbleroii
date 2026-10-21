@@ -1,6 +1,7 @@
 import pytest
 
 from clibridge import resolve_model
+from clibridge.config import is_bridge_model
 from clibridge.prompting import build_prompt, extract_json, parse_tool_reply, tool_schema
 
 
@@ -28,6 +29,13 @@ from clibridge.prompting import build_prompt, extract_json, parse_tool_reply, to
 def test_resolve_model(name, backend, model, agent):
     route = resolve_model(name)
     assert (route.backend, route.model, route.agent) == (backend, model, agent)
+
+
+def test_is_bridge_model():
+    for name in ("claude-code", "claude-code/fable", "claude-code-agent/opus", "codex", "codex/gpt-5.5", "codex-agent"):
+        assert is_bridge_model(name)
+    for name in ("gpt-4o", "claude-sonnet-4-5", "codex-mini-latest", "clibridge", "", None):
+        assert not is_bridge_model(name)
 
 
 def test_unknown_model_uses_default_backend():
