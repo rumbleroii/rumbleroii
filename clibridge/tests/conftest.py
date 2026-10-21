@@ -13,6 +13,20 @@ from clibridge import BridgeConfig
 FAKE_CLI = pathlib.Path(__file__).parent / "fake_cli"
 
 
+@pytest.fixture(autouse=True)
+def isolated_settings(monkeypatch):
+    """Ignore the developer's own CLIBRIDGE_* variables and .env files, and forget rejected flags."""
+    from clibridge import backends
+
+    for name in list(os.environ):
+        if name.startswith("CLIBRIDGE_") and name != "CLIBRIDGE_AUTOLOAD":
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("CLIBRIDGE_ENV_FILE", os.devnull)
+    backends._unsupported.clear()
+    yield
+    backends._unsupported.clear()
+
+
 @pytest.fixture
 def calls(tmp_path, monkeypatch):
     """Returns a function that reads what the fake CLIs were called with."""

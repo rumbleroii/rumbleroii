@@ -3,16 +3,72 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+BRIDGE_MODEL = "clibridge"  # model name that means "whatever CLIBRIDGE_MODEL says"
+DEFAULT_MODEL = "claude-code"
 CLAUDE_ALIASES = ("fable", "opus", "sonnet", "haiku")
 _CLAUDE_BACKENDS = ("claude", "claude-code", "claude-cli")
 _CODEX_BACKENDS = ("codex", "codex-cli")
 _VENDOR_PREFIXES = ("openai", "anthropic")
 
+_dotenv_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
+
+
+def _find_dotenv() -> Optional[str]:
+    """``CLIBRIDGE_ENV_FILE``, else the nearest ``.env`` in the current directory or a parent."""
+    explicit = os.environ.get("CLIBRIDGE_ENV_FILE")
+    if explicit:
+        return explicit
+    directory = os.getcwd()
+    while True:
+        path = os.path.join(directory, ".env")
+        if os.path.isfile(path):
+            return path
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
+def _parse_dotenv(text: str) -> Dict[str, str]:
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not key.startswith("CLIBRIDGE_"):
+            continue  # only our own settings; leave everything else in the file alone
+        if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
+            value = value[1:-1]
+        else:
+            value = value.split(" #", 1)[0].strip()
+        values[key] = value
+    return values
+
+
+def dotenv_values() -> Dict[str, str]:
+    """``CLIBRIDGE_*`` settings from the .env file (re-read when the file changes)."""
+    path = _find_dotenv()
+    if not path:
+        return {}
+    try:
+        mtime = os.stat(path).st_mtime
+        cached = _dotenv_cache.get(path)
+        if cached is None or cached[0] != mtime:
+            with open(path, encoding="utf-8") as fh:
+                cached = (mtime, _parse_dotenv(fh.read()))
+            _dotenv_cache[path] = cached
+    except OSError:
+        return {}
+    return cached[1]
+
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
-    value = os.environ.get(name)
+    """A setting from the environment, else from the .env file. Real env vars win."""
+    value = os.environ.get(name) or dotenv_values().get(name)
     return value if value else default
 
 
@@ -20,8 +76,15 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
 class BridgeConfig:
     """Settings shared by the server, the in-process clients and the integrations.
 
-    Every field can also be set through a ``CLIBRIDGE_*`` environment variable.
+    Every field can also be set through a ``CLIBRIDGE_*`` environment variable or
+    the same line in a ``.env`` file.
     """
+
+    # What model="clibridge" means, e.g. "claude-code/sonnet" or "codex".
+    model: str = field(default_factory=lambda: _env("CLIBRIDGE_MODEL", DEFAULT_MODEL))
+    # Default thinking level when a request doesn't set one:
+    # none, minimal, low, medium, high, xhigh or max (None = the CLI's default).
+    effort: Optional[str] = field(default_factory=lambda: _env("CLIBRIDGE_EFFORT"))
 
     claude_bin: str = field(default_factory=lambda: _env("CLIBRIDGE_CLAUDE_BIN", "claude"))
     codex_bin: str = field(default_factory=lambda: _env("CLIBRIDGE_CODEX_BIN", "codex"))
@@ -74,7 +137,7 @@ def is_bridge_model(name: Optional[str]) -> bool:
     base = name.partition("/")[0].lower()
     if base.endswith("-agent"):
         base = base[: -len("-agent")]
-    return base in _CLAUDE_BACKENDS or base in _CODEX_BACKENDS
+    return base == BRIDGE_MODEL or base in _CLAUDE_BACKENDS or base in _CODEX_BACKENDS
 
 
 @dataclass(frozen=True)
@@ -84,9 +147,11 @@ class Route:
     agent: bool = False
 
 
-def resolve_model(name: Optional[str], default_backend: str = "claude") -> Route:
+def resolve_model(name: Optional[str], default_backend: str = "claude",
+                  bridge_model: Optional[str] = None) -> Route:
     """Map the ``model`` field of a request to a CLI backend and model.
 
+    * ``clibridge`` (``clibridge-agent``): ``bridge_model``, else ``CLIBRIDGE_MODEL``, else claude-code.
     * Names from ``CLIBRIDGE_ALIASES`` are replaced by their target first.
     * ``claude-code``, ``claude-code/opus``, ``codex``, ``codex/gpt-5-codex``: explicit.
     * ``claude-code-agent[/model]``, ``codex-agent[/model]``: agent mode.
@@ -106,6 +171,12 @@ def resolve_model(name: Optional[str], default_backend: str = "claude") -> Route
     agent = base.endswith("-agent")
     if agent:
         base = base[: -len("-agent")]
+    if base == BRIDGE_MODEL:
+        target = (bridge_model or _env("CLIBRIDGE_MODEL") or DEFAULT_MODEL).strip()
+        if target.partition("/")[0].lower().replace("-agent", "") == BRIDGE_MODEL:
+            target = DEFAULT_MODEL  # don't loop
+        route = resolve_model(target, default_backend)
+        return Route(route.backend, route.model, route.agent or agent)
     if base in _CLAUDE_BACKENDS:
         return Route("claude", tail, agent)
     if base in _CODEX_BACKENDS:

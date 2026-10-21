@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import base64
-import functools
 import json
 import mimetypes
 import os
+import re
 import shutil
-import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .config import BridgeConfig
 from .errors import BridgeError
@@ -21,7 +20,10 @@ CODEX_CHAT_NOTE = (
     "Answer directly from your own knowledge. Do not run shell commands, read or change "
     "files, or browse the web."
 )
-CLAUDE_EFFORT = {"none": "low", "minimal": "low"}
+# Thinking levels a request may ask for, mapped to what each CLI accepts.
+# For Claude, "none" turns thinking off instead (CLAUDE_CODE_DISABLE_THINKING).
+CLAUDE_EFFORT = {"minimal": "low"}
+CODEX_EFFORT = {"minimal": "low", "max": "xhigh"}
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "clibridge.local")
 
 
@@ -46,6 +48,13 @@ class TextDelta:
 
 
 @dataclass
+class ThinkingDelta:
+    """Part of the model's thinking (a summary, as the CLIs show it)."""
+
+    text: str
+
+
+@dataclass
 class ToolActivity:
     """The CLI agent used one of its own tools (agent mode only)."""
 
@@ -60,6 +69,8 @@ class Final:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    reasoning: str = ""
+    reasoning_tokens: int = 0
     session_id: Optional[str] = None
     cost_usd: Optional[float] = None
     num_turns: Optional[int] = None
@@ -86,15 +97,39 @@ def resolve_binary(name: str) -> str:
     return path
 
 
-@functools.lru_cache(maxsize=None)
-def _help_text(argv: Tuple[str, ...]) -> str:
-    try:
-        out = subprocess.run(
-            list(argv), capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return out.stdout + out.stderr
+class UnsupportedFlag(BridgeError):
+    """The installed CLI is too old (or too new) for one of our optional flags."""
+
+    def __init__(self, binary: str, flag: str):
+        super().__init__(f"{os.path.basename(binary)} does not support {flag}")
+        self.binary = binary
+        self.flag = flag
+
+
+# Optional flags the installed CLIs rejected; the runner retries without them.
+_unsupported: Set[Tuple[str, str]] = set()
+_UNKNOWN_FLAG = re.compile(r"(?:unknown option|unexpected argument) '(--[\w-]+)'")
+
+
+def mark_unsupported(error: UnsupportedFlag) -> bool:
+    """Remember a rejected flag. False if it was already known (so retrying won't help)."""
+    key = (error.binary, error.flag)
+    if key in _unsupported:
+        return False
+    _unsupported.add(key)
+    return True
+
+
+def _optional(argv: List[str], binary: str, flag: str, *values: str) -> None:
+    """Add a flag the CLI might not know; if it rejects it once, it is skipped from then on."""
+    if (binary, flag) not in _unsupported:
+        argv += [flag, *values]
+
+
+def _check_unknown_flag(binary: str, stderr: str, optional: Tuple[str, ...]) -> None:
+    match = _UNKNOWN_FLAG.search(stderr)
+    if match and match.group(1) in optional:
+        raise UnsupportedFlag(binary, match.group(1))
 
 
 def chat_dir() -> str:
@@ -145,9 +180,10 @@ class ClaudeBackend:
     def __init__(self, config: BridgeConfig):
         self.config = config
 
+    OPTIONAL_FLAGS = ("--safe-mode", "--json-schema", "--effort", "--thinking-display")
+
     def build(self, spec: RunSpec) -> Invocation:
         binary = resolve_binary(self.config.claude_bin)
-        supports = _help_text((binary, "--help")).__contains__
         argv = [binary, "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
         if spec.stream:
             argv.append("--include-partial-messages")
@@ -165,12 +201,16 @@ class ClaudeBackend:
             # Plain LLM: no tools, no MCP servers, our system prompt instead of Claude Code's.
             cwd = chat_dir()
             argv += ["--tools", "", "--strict-mcp-config", "--system-prompt", spec.system or DEFAULT_SYSTEM]
-            if supports("--safe-mode"):
-                argv.append("--safe-mode")
-        if spec.json_schema is not None and supports("--json-schema"):
-            argv += ["--json-schema", json.dumps(spec.json_schema)]
-        if spec.effort and supports("--effort"):
-            argv += ["--effort", CLAUDE_EFFORT.get(spec.effort, spec.effort)]
+            _optional(argv, binary, "--safe-mode")
+        if spec.json_schema is not None:
+            _optional(argv, binary, "--json-schema", json.dumps(spec.json_schema))
+        env = child_env(self.config)
+        if spec.effort == "none":
+            env["CLAUDE_CODE_DISABLE_THINKING"] = "1"
+        elif spec.effort:
+            _optional(argv, binary, "--effort", CLAUDE_EFFORT.get(spec.effort, spec.effort))
+        # Headless Claude Code sends thinking as empty text unless asked for summaries.
+        _optional(argv, binary, "--thinking-display", "summarized")
         argv += self.config.claude_args
 
         if spec.images:
@@ -196,17 +236,20 @@ class ClaudeBackend:
             stdin = json.dumps(message) + "\n"
         else:
             stdin = spec.prompt
-        return Invocation(argv, stdin.encode("utf-8"), cwd, child_env(self.config))
+        return Invocation(argv, stdin.encode("utf-8"), cwd, env)
 
     def parser(self) -> "ClaudeParser":
-        return ClaudeParser()
+        return ClaudeParser(resolve_binary(self.config.claude_bin), self.OPTIONAL_FLAGS)
 
 
 class ClaudeParser:
     """Parses `claude -p --output-format stream-json --verbose` lines."""
 
-    def __init__(self) -> None:
+    def __init__(self, binary: str = "claude", optional: Tuple[str, ...] = ()) -> None:
+        self.binary = binary
+        self.optional = optional
         self.final: Optional[Final] = None
+        self.thinking: List[str] = []
         self._emitted = False
         self._need_break = False
 
@@ -221,7 +264,9 @@ class ClaudeParser:
                 self._need_break = self._emitted
             elif event.get("type") == "content_block_delta":
                 delta = event.get("delta") or {}
-                if delta.get("type") == "text_delta" and delta.get("text"):
+                if delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                    out.append(ThinkingDelta(delta["thinking"]))
+                elif delta.get("type") == "text_delta" and delta.get("text"):
                     if self._need_break:
                         out.append(TextDelta("\n\n"))
                         self._need_break = False
@@ -229,9 +274,12 @@ class ClaudeParser:
                     out.append(TextDelta(delta["text"]))
         elif kind == "assistant":
             for block in (obj.get("message") or {}).get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    if block.get("name") != "StructuredOutput":
-                        out.append(ToolActivity(block.get("name", "tool"), _summarize(block.get("input"))))
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "thinking" and block.get("thinking"):
+                    self.thinking.append(block["thinking"].strip())
+                elif block.get("type") == "tool_use" and block.get("name") != "StructuredOutput":
+                    out.append(ToolActivity(block.get("name", "tool"), _summarize(block.get("input"))))
         elif kind == "result":
             self.final = self._final(obj)
         return out
@@ -252,6 +300,8 @@ class ClaudeParser:
             input_tokens=int(usage.get("input_tokens") or 0) + cache_read + cache_write,
             output_tokens=int(usage.get("output_tokens") or 0),
             cached_tokens=cache_read,
+            reasoning="\n\n".join(t for t in self.thinking if t),
+            reasoning_tokens=int((usage.get("output_tokens_details") or {}).get("thinking_tokens") or 0),
             session_id=obj.get("session_id"),
             cost_usd=obj.get("total_cost_usd"),
             num_turns=obj.get("num_turns"),
@@ -260,6 +310,7 @@ class ClaudeParser:
 
     def finish(self, returncode: int, stderr: str) -> List[Any]:
         if self.final is None:
+            _check_unknown_flag(self.binary, stderr, self.optional)
             raise BridgeError(f"claude exited with code {returncode} without a result. {_tail(stderr)}")
         return [self.final]
 
@@ -270,16 +321,17 @@ class CodexBackend:
     def __init__(self, config: BridgeConfig):
         self.config = config
 
+    OPTIONAL_FLAGS = ("--ephemeral",)
+
     def build(self, spec: RunSpec) -> Invocation:
         binary = resolve_binary(self.config.codex_bin)
-        supports = _help_text((binary, "exec", "--help")).__contains__
         argv = [binary, "exec", "--json", "--skip-git-repo-check", "--color", "never"]
-        if supports("--ephemeral"):
-            argv.append("--ephemeral")
+        _optional(argv, binary, "--ephemeral")
         if spec.model:
             argv += ["--model", spec.model]
         if spec.effort:
-            argv += ["--config", f"model_reasoning_effort={json.dumps(spec.effort)}"]
+            effort = CODEX_EFFORT.get(spec.effort, spec.effort)
+            argv += ["--config", f"model_reasoning_effort={json.dumps(effort)}"]
         if spec.agent:
             cwd = spec.cwd or self.config.workdir or os.getcwd()
             argv += ["--sandbox", self.config.sandbox]
@@ -303,14 +355,17 @@ class CodexBackend:
         return Invocation(argv, prompt.encode("utf-8"), cwd, child_env(self.config), cleanup)
 
     def parser(self) -> "CodexParser":
-        return CodexParser()
+        return CodexParser(resolve_binary(self.config.codex_bin), self.OPTIONAL_FLAGS)
 
 
 class CodexParser:
     """Parses `codex exec --json` JSONL events."""
 
-    def __init__(self) -> None:
+    def __init__(self, binary: str = "codex", optional: Tuple[str, ...] = ()) -> None:
+        self.binary = binary
+        self.optional = optional
         self.messages: List[str] = []
+        self.thinking: List[str] = []
         self.usage: Dict[str, Any] = {}
         self.thread_id: Optional[str] = None
         self.error: Optional[str] = None
@@ -328,6 +383,10 @@ class CodexParser:
                 delta = ("\n\n" if self.messages else "") + text
                 self.messages.append(text)
                 return [TextDelta(delta)] if text else []
+            if item_type == "reasoning" and item.get("text"):
+                delta = ("\n\n" if self.thinking else "") + item["text"]
+                self.thinking.append(item["text"])
+                return [ThinkingDelta(delta)]
             if item_type == "command_execution":
                 return [ToolActivity("shell", _summarize(item.get("command", "")))]
             if item_type == "file_change":
@@ -349,6 +408,7 @@ class CodexParser:
 
     def finish(self, returncode: int, stderr: str) -> List[Any]:
         if not self.completed:
+            _check_unknown_flag(self.binary, stderr, self.optional)
             detail = self.error or f"exited with code {returncode}. {_tail(stderr)}"
             status = 429 if "limit" in detail.lower() else 424
             raise BridgeError(f"codex: {detail}", status=status)
@@ -359,6 +419,8 @@ class CodexParser:
                 input_tokens=int(usage.get("input_tokens") or 0),
                 output_tokens=int(usage.get("output_tokens") or 0),
                 cached_tokens=int(usage.get("cached_input_tokens") or 0),
+                reasoning="\n\n".join(self.thinking),
+                reasoning_tokens=int(usage.get("reasoning_output_tokens") or 0),
                 session_id=self.thread_id,
             )
         ]

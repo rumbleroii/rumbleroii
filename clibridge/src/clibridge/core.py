@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 
 from . import runner
-from .backends import Final, RunSpec, TextDelta, ToolActivity
+from .backends import Final, RunSpec, TextDelta, ThinkingDelta, ToolActivity
 from .config import BridgeConfig, resolve_model
 from .errors import BridgeError
 from .prompting import (
@@ -37,6 +37,13 @@ class ToolCall:
 
 
 @dataclass
+class Thinking:
+    """A streamed piece of the model's thinking."""
+
+    text: str
+
+
+@dataclass
 class ChatResult:
     content: Optional[str]
     tool_calls: List[ToolCall]
@@ -44,11 +51,14 @@ class ChatResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
-    streamed: bool = False  # content was already yielded as deltas
+    reasoning: str = ""  # the model's thinking, when the CLI shows it
+    reasoning_tokens: int = 0
+    streamed: bool = False  # content was already yielded as str deltas
+    reasoning_streamed: bool = False  # reasoning was already yielded as Thinking items
     meta: Dict[str, Any] = field(default_factory=dict)
 
 
-ChatItem = Union[str, ChatResult]
+ChatItem = Union[str, Thinking, ChatResult]
 
 
 def new_id(prefix: str) -> str:
@@ -62,7 +72,7 @@ class ChatJob:
         messages = request.get("messages")
         if not isinstance(messages, list) or not messages:
             raise BridgeError("`messages` must be a non-empty list", status=400)
-        route = resolve_model(request.get("model"), config.default_backend)
+        route = resolve_model(request.get("model"), config.default_backend, config.model)
         self.backend = route.backend
 
         tools = function_tools(request)
@@ -109,7 +119,7 @@ class ChatJob:
             json_schema=schema,
             agent=bool(request.get("agent", route.agent)),
             cwd=request.get("cwd"),
-            effort=request.get("reasoning_effort") or (request.get("reasoning") or {}).get("effort"),
+            effort=request.get("reasoning_effort") or (request.get("reasoning") or {}).get("effort") or config.effort,
             max_turns=int(max_turns) if max_turns else None,
             stream=bool(request.get("stream")) and self.mode == "text",
         )
@@ -149,6 +159,8 @@ class ChatJob:
             prompt_tokens=final.input_tokens,
             completion_tokens=final.output_tokens,
             cached_tokens=final.cached_tokens,
+            reasoning=final.reasoning,
+            reasoning_tokens=final.reasoning_tokens,
             streamed=streamed,
             meta=meta,
         )
@@ -159,21 +171,26 @@ def _log_activity(backend: str, event: ToolActivity) -> None:
 
 
 def iter_chat(request: Dict[str, Any], config: Optional[BridgeConfig] = None) -> Iterator[ChatItem]:
-    """Yield text deltas (when ``request["stream"]`` is set), then one ChatResult."""
+    """Yield text deltas (str) and Thinking items when ``request["stream"]`` is set, then one ChatResult."""
     config = config or BridgeConfig()
     job = ChatJob(request, config)
     final: Optional[Final] = None
-    streamed = False
+    streamed = thought = False
     for event in runner.run(job.spec, config):
         if isinstance(event, TextDelta):
             if job.spec.stream:
                 streamed = True
                 yield event.text
+        elif isinstance(event, ThinkingDelta):
+            if job.spec.stream:
+                thought = True
+                yield Thinking(event.text)
         elif isinstance(event, ToolActivity):
             _log_activity(job.backend, event)
         elif isinstance(event, Final):
             final = event
     result = job.result(final, streamed)
+    result.reasoning_streamed = thought
     if job.spec.stream and not streamed and result.content:
         result.streamed = True
         yield result.content
@@ -185,17 +202,22 @@ async def aiter_chat(request: Dict[str, Any], config: Optional[BridgeConfig] = N
     config = config or BridgeConfig()
     job = ChatJob(request, config)
     final: Optional[Final] = None
-    streamed = False
+    streamed = thought = False
     async for event in runner.arun(job.spec, config):
         if isinstance(event, TextDelta):
             if job.spec.stream:
                 streamed = True
                 yield event.text
+        elif isinstance(event, ThinkingDelta):
+            if job.spec.stream:
+                thought = True
+                yield Thinking(event.text)
         elif isinstance(event, ToolActivity):
             _log_activity(job.backend, event)
         elif isinstance(event, Final):
             final = event
     result = job.result(final, streamed)
+    result.reasoning_streamed = thought
     if job.spec.stream and not streamed and result.content:
         result.streamed = True
         yield result.content

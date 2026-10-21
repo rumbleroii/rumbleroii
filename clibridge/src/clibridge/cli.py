@@ -10,7 +10,7 @@ import sys
 from typing import List, Optional
 
 from .config import BridgeConfig
-from .core import ChatResult, iter_chat
+from .core import ChatResult, Thinking, iter_chat
 from .errors import BridgeError
 
 
@@ -59,13 +59,22 @@ def _ask(args: argparse.Namespace) -> int:
     request = {"model": args.model, "messages": messages, "stream": True}
     if args.agent:
         request["agent"] = True
+    if args.effort:
+        request["reasoning_effort"] = args.effort
     try:
         for item in iter_chat(request, _config(args)):
             if isinstance(item, str):
                 sys.stdout.write(item)
                 sys.stdout.flush()
-            elif isinstance(item, ChatResult) and not item.streamed and item.content:
-                sys.stdout.write(item.content)
+            elif isinstance(item, Thinking):
+                if args.show_thinking:
+                    sys.stderr.write(f"\033[2m{item.text}\033[0m")  # dimmed
+                    sys.stderr.flush()
+            elif isinstance(item, ChatResult):
+                if args.show_thinking and item.reasoning and not item.reasoning_streamed:
+                    sys.stderr.write(f"\033[2m{item.reasoning}\033[0m\n")
+                if not item.streamed and item.content:
+                    sys.stdout.write(item.content)
     except BridgeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -88,7 +97,8 @@ def _doctor(args: argparse.Namespace) -> int:
             version = f"(could not run: {exc})"
         print(f"✓ {backend}: {path} {version}")
         if args.ping:
-            request = {"model": backend, "messages": [{"role": "user", "content": "Reply with the word: ok"}]}
+            request = {"model": backend, "messages": [{"role": "user", "content": "Reply with the word: ok"}],
+                       "reasoning_effort": "low"}
             try:
                 reply = None
                 for item in iter_chat(request, config):
@@ -97,8 +107,9 @@ def _doctor(args: argparse.Namespace) -> int:
             except BridgeError as exc:
                 print(f"  ✗ test call failed: {exc}")
                 ok = False
+    print(f"✓ model=\"clibridge\" means: {config.model}" + (f" (thinking: {config.effort})" if config.effort else ""))
     if any(type(f).__module__ == "_clibridge_autoload" for f in sys.meta_path):
-        print('✓ auto mode: on. Plain openai / litellm / anthropic code can use model="claude-code" or "codex"')
+        print('✓ auto mode: on. Plain openai / litellm / anthropic / langchain code can use model="clibridge"')
     else:
         print("✗ auto mode: off (CLIBRIDGE_AUTOLOAD=0, or clibridge isn't pip-installed in this Python)")
     if not args.ping:
@@ -122,7 +133,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     ask = sub.add_parser("ask", help="send one prompt and stream the reply")
     ask.add_argument("prompt", nargs="?", help="the prompt (read from stdin if omitted)")
-    ask.add_argument("-m", "--model", default="claude-code", help="e.g. claude-code, claude-code/opus, codex")
+    ask.add_argument("-m", "--model", default="clibridge",
+                     help="e.g. clibridge (= CLIBRIDGE_MODEL), claude-code, claude-code/opus, codex")
+    ask.add_argument("-e", "--effort", choices=["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                     help="thinking level")
+    ask.add_argument("-t", "--show-thinking", action="store_true", help="print the model's thinking (dimmed)")
     ask.add_argument("-s", "--system", help="system prompt")
     ask.add_argument("--agent", action="store_true", help="let the CLI use its own tools in --workdir")
     ask.add_argument("-v", "--verbose", action="count", default=0, help="-v: show agent tool use")

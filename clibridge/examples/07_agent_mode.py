@@ -7,7 +7,7 @@ unless you set CLIBRIDGE_PERMISSION_MODE=acceptEdits.
 from openai import OpenAI
 
 reply = OpenAI().chat.completions.create(
-    model="claude-code-agent",  # or "codex-agent"
+    model="clibridge-agent",  # agent version of CLIBRIDGE_MODEL
     messages=[{"role": "user", "content": "Look at the files here and summarize this project in 3 bullets."}],
 )
 print(reply.choices[0].message.content)

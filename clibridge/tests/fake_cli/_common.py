@@ -63,3 +63,11 @@ def tool_reply(prompt, names, args_as_string, instructions=""):
 def reply_text(model, prompt):
     last = prompt.strip().splitlines()[-1] if prompt.strip() else ""
     return f"pong from {model}: {last[:200]}"
+
+
+def reject_flags(args, message):
+    """Act like a CLI version that lacks some flags (FAKE_REJECT_FLAGS="--a,--b")."""
+    for flag in filter(None, os.environ.get("FAKE_REJECT_FLAGS", "").split(",")):
+        if flag in args:
+            sys.stderr.write(message.format(flag=flag) + "\n")
+            sys.exit(2)

@@ -21,18 +21,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def run(code, **env):
+def run(code, cwd=None, **env):
     full_env = {k: v for k, v in os.environ.items()
                 if k not in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLIBRIDGE_AUTOLOAD")}
     full_env.update(CLIBRIDGE_CLAUDE_BIN=str(FAKE_CLI / "claude"), CLIBRIDGE_CODEX_BIN=str(FAKE_CLI / "codex"))
     full_env.update(env)
     proc = subprocess.run([sys.executable, "-W", "error::RuntimeWarning", "-c", textwrap.dedent(code)],
-                          capture_output=True, text=True, env=full_env, timeout=120)
+                          capture_output=True, text=True, env=full_env, timeout=120, cwd=cwd)
     return proc
 
 
-def output(code, **env):
-    proc = run(code, **env)
+def output(code, cwd=None, **env):
+    proc = run(code, cwd=cwd, **env)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip().splitlines()
 
@@ -136,3 +136,14 @@ def test_missing_key_still_errors_without_the_hook():
     pytest.importorskip("openai")
     proc = run("from openai import OpenAI; OpenAI()", CLIBRIDGE_AUTOLOAD="0")
     assert proc.returncode != 0 and "OPENAI_API_KEY" in proc.stderr
+
+
+def test_clibridge_model_from_dotenv(tmp_path):
+    pytest.importorskip("litellm")
+    (tmp_path / ".env").write_text("CLIBRIDGE_MODEL=codex/gpt-5.5\n")
+    assert output("""
+        import litellm
+        from openai import OpenAI
+        print(OpenAI().chat.completions.create(model="clibridge", messages=[{"role": "user", "content": "1"}]).choices[0].message.content)
+        print(litellm.completion(model="clibridge", messages=[{"role": "user", "content": "2"}]).choices[0].message.content)
+    """, cwd=tmp_path, CLIBRIDGE_ENV_FILE="") == ["pong from gpt-5.5: 1", "pong from gpt-5.5: 2"]

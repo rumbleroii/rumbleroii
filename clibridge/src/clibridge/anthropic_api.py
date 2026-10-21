@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from .core import ChatItem, ChatResult, new_id
+from .core import ChatItem, ChatResult, Thinking, new_id
 
 Event = Tuple[str, Dict[str, Any]]
 
@@ -106,13 +106,35 @@ def to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         request["parallel_tool_calls"] = False
     if body.get("stop_sequences"):
         request["stop"] = body["stop_sequences"]
-    effort = (body.get("output_config") or {}).get("effort")
+    effort = (body.get("output_config") or {}).get("effort") or _thinking_effort(body.get("thinking"))
     if effort:
         request["reasoning_effort"] = effort
     for key in ("agent", "cwd", "max_turns"):
         if key in body:
             request[key] = body[key]
     return request
+
+
+def _thinking_effort(thinking: Any) -> Optional[str]:
+    """Map the ``thinking`` parameter to a thinking level (the CLIs take levels, not token budgets)."""
+    if not isinstance(thinking, dict):
+        return None
+    if thinking.get("type") == "disabled":
+        return "none"
+    budget = thinking.get("budget_tokens")
+    if thinking.get("type") != "enabled" or not isinstance(budget, int):
+        return None  # "adaptive": let the model decide
+    for limit, effort in ((4096, "low"), (16384, "medium"), (32768, "high")):
+        if budget < limit:
+            return effort
+    return "xhigh"
+
+
+def wants_thinking(body: Dict[str, Any]) -> bool:
+    """Thinking blocks are only returned when the request turned thinking on, like the real API."""
+    thinking = body.get("thinking")
+    return (isinstance(thinking, dict) and thinking.get("type") in ("enabled", "adaptive")
+            and thinking.get("display") != "omitted")
 
 
 def _input(arguments: str) -> Dict[str, Any]:
@@ -138,6 +160,8 @@ def _usage(result: ChatResult) -> Dict[str, Any]:
 
 def message(result: ChatResult, body: Dict[str, Any]) -> Dict[str, Any]:
     content: List[Dict[str, Any]] = []
+    if result.reasoning and wants_thinking(body):
+        content.append({"type": "thinking", "thinking": result.reasoning, "signature": ""})
     if result.content:
         content.append({"type": "text", "text": result.content})
     for call in result.tool_calls:
@@ -172,8 +196,9 @@ class MessageEncoder:
 
     def __init__(self, body: Dict[str, Any]):
         self.body = body
+        self.thinking = wants_thinking(body)
         self.index = -1
-        self.text_open = False
+        self.open: Optional[str] = None  # kind of the content block being streamed
 
     def start(self) -> List[Event]:
         return [("message_start", {
@@ -190,26 +215,36 @@ class MessageEncoder:
             },
         })]
 
-    def _text(self, text: str) -> List[Event]:
+    def _close(self) -> List[Event]:
+        if self.open is None:
+            return []
+        self.open = None
+        return [("content_block_stop", {"type": "content_block_stop", "index": self.index})]
+
+    def _delta(self, kind: str, text: str) -> List[Event]:
         events = []
-        if not self.text_open:
+        if self.open != kind:
+            events += self._close()
             self.index += 1
-            self.text_open = True
+            self.open = kind
+            block = {"type": "text", "text": ""} if kind == "text" else {"type": "thinking", "thinking": "", "signature": ""}
             events.append(("content_block_start", {"type": "content_block_start", "index": self.index,
-                                                   "content_block": {"type": "text", "text": ""}}))
-        events.append(("content_block_delta", {"type": "content_block_delta", "index": self.index,
-                                               "delta": {"type": "text_delta", "text": text}}))
+                                                   "content_block": block}))
+        delta = {"type": "text_delta", "text": text} if kind == "text" else {"type": "thinking_delta", "thinking": text}
+        events.append(("content_block_delta", {"type": "content_block_delta", "index": self.index, "delta": delta}))
         return events
 
     def encode(self, item: ChatItem) -> List[Event]:
         if isinstance(item, str):
-            return self._text(item)
+            return self._delta("text", item)
+        if isinstance(item, Thinking):
+            return self._delta("thinking", item.text) if self.thinking else []
         events = []
+        if self.thinking and item.reasoning and not item.reasoning_streamed:
+            events += self._delta("thinking", item.reasoning)
         if item.content and not item.streamed:
-            events += self._text(item.content)
-        if self.text_open:
-            events.append(("content_block_stop", {"type": "content_block_stop", "index": self.index}))
-            self.text_open = False
+            events += self._delta("text", item.content)
+        events += self._close()
         for call in item.tool_calls:
             self.index += 1
             events.append(("content_block_start", {

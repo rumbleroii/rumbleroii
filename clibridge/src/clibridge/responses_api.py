@@ -7,7 +7,7 @@ import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-from .core import ChatItem, ChatResult, new_id
+from .core import ChatItem, ChatResult, Thinking, new_id
 from .errors import BridgeError
 from .prompting import content_text
 
@@ -111,7 +111,7 @@ def _usage(result: ChatResult) -> Dict[str, Any]:
         "input_tokens": result.prompt_tokens,
         "input_tokens_details": {"cached_tokens": result.cached_tokens},
         "output_tokens": result.completion_tokens,
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": result.reasoning_tokens},
         "total_tokens": result.prompt_tokens + result.completion_tokens,
     }
 
@@ -123,6 +123,11 @@ def _text_part(text: str) -> Dict[str, Any]:
 def _message_item(item_id: str, text: str, status: str = "completed") -> Dict[str, Any]:
     content = [_text_part(text)] if status == "completed" else []
     return {"type": "message", "id": item_id, "status": status, "role": "assistant", "content": content}
+
+
+def _reasoning_item(item_id: str, text: str, status: str = "completed") -> Dict[str, Any]:
+    summary = [{"type": "summary_text", "text": text}] if status == "completed" else []
+    return {"type": "reasoning", "id": item_id, "summary": summary, "status": status}
 
 
 def _call_item(item_id: str, call: Any, status: str = "completed") -> Dict[str, Any]:
@@ -143,9 +148,12 @@ class ResponseEncoder:
         self.body = body
         self.id = response_id or new_id("resp_")
         self.created = int(time.time())
+        # Like the real API, reasoning items only appear when the request asks about reasoning.
+        self.show_reasoning = body.get("reasoning") is not None
         self.seq = 0
         self.output: List[Dict[str, Any]] = []
-        self.msg_id: Optional[str] = None
+        self.open_kind: Optional[str] = None  # "message" or "reasoning" item being streamed
+        self.item_id = ""
         self.text = ""
 
     def envelope(self, status: str, output: List[Dict[str, Any]], result: Optional[ChatResult] = None) -> Dict[str, Any]:
@@ -168,7 +176,7 @@ class ResponseEncoder:
             "temperature": None,
             "top_p": None,
             "max_output_tokens": None,
-            "reasoning": None,
+            "reasoning": self.body.get("reasoning"),
             "store": True,
             "truncation": "disabled",
             "error": None,
@@ -179,6 +187,8 @@ class ResponseEncoder:
 
     def response(self, result: ChatResult) -> Dict[str, Any]:
         output = []
+        if self.show_reasoning and result.reasoning:
+            output.append(_reasoning_item(new_id("rs_"), result.reasoning))
         if result.content:
             output.append(_message_item(new_id("msg_"), result.content))
         output += [_call_item(new_id("fc_"), call) for call in result.tool_calls]
@@ -194,34 +204,71 @@ class ResponseEncoder:
         snapshot = self.envelope("in_progress", [])
         return [self._event("response.created", response=snapshot), self._event("response.in_progress", response=snapshot)]
 
-    def _text_delta(self, text: str) -> List[Event]:
-        events = []
-        if self.msg_id is None:
-            self.msg_id = new_id("msg_")
-            events.append(self._event("response.output_item.added", output_index=len(self.output),
-                                      item=_message_item(self.msg_id, "", "in_progress")))
-            events.append(self._event("response.content_part.added", item_id=self.msg_id,
-                                      output_index=len(self.output), content_index=0, part=_text_part("")))
+    def _close(self) -> List[Event]:
+        if self.open_kind is None:
+            return []
+        index, item_id, text = len(self.output), self.item_id, self.text
+        if self.open_kind == "message":
+            done = _message_item(item_id, text)
+            events = [
+                self._event("response.output_text.done", item_id=item_id, output_index=index, content_index=0,
+                            text=text, logprobs=[]),
+                self._event("response.content_part.done", item_id=item_id, output_index=index, content_index=0,
+                            part=_text_part(text)),
+            ]
+        else:
+            done = _reasoning_item(item_id, text)
+            events = [
+                self._event("response.reasoning_summary_text.done", item_id=item_id, output_index=index,
+                            summary_index=0, text=text),
+                self._event("response.reasoning_summary_part.done", item_id=item_id, output_index=index,
+                            summary_index=0, part={"type": "summary_text", "text": text}),
+            ]
+        events.append(self._event("response.output_item.done", output_index=index, item=done))
+        self.output.append(done)
+        self.open_kind = None
+        return events
+
+    def _delta(self, kind: str, text: str) -> List[Event]:
+        events: List[Event] = []
+        index = len(self.output)
+        if self.open_kind != kind:
+            events += self._close()
+            index = len(self.output)
+            self.open_kind, self.text = kind, ""
+            if kind == "message":
+                self.item_id = new_id("msg_")
+                events.append(self._event("response.output_item.added", output_index=index,
+                                          item=_message_item(self.item_id, "", "in_progress")))
+                events.append(self._event("response.content_part.added", item_id=self.item_id, output_index=index,
+                                          content_index=0, part=_text_part("")))
+            else:
+                self.item_id = new_id("rs_")
+                events.append(self._event("response.output_item.added", output_index=index,
+                                          item=_reasoning_item(self.item_id, "", "in_progress")))
+                events.append(self._event("response.reasoning_summary_part.added", item_id=self.item_id,
+                                          output_index=index, summary_index=0,
+                                          part={"type": "summary_text", "text": ""}))
         self.text += text
-        events.append(self._event("response.output_text.delta", item_id=self.msg_id, output_index=len(self.output),
-                                  content_index=0, delta=text, logprobs=[]))
+        if kind == "message":
+            events.append(self._event("response.output_text.delta", item_id=self.item_id, output_index=index,
+                                      content_index=0, delta=text, logprobs=[]))
+        else:
+            events.append(self._event("response.reasoning_summary_text.delta", item_id=self.item_id,
+                                      output_index=index, summary_index=0, delta=text))
         return events
 
     def encode(self, item: ChatItem) -> List[Event]:
         if isinstance(item, str):
-            return self._text_delta(item)
+            return self._delta("message", item)
+        if isinstance(item, Thinking):
+            return self._delta("reasoning", item.text) if self.show_reasoning else []
         events = []
+        if self.show_reasoning and item.reasoning and not item.reasoning_streamed:
+            events += self._delta("reasoning", item.reasoning)
         if item.content and not item.streamed:
-            events += self._text_delta(item.content)
-        if self.msg_id is not None:
-            index = len(self.output)
-            done = _message_item(self.msg_id, self.text)
-            events.append(self._event("response.output_text.done", item_id=self.msg_id, output_index=index,
-                                      content_index=0, text=self.text, logprobs=[]))
-            events.append(self._event("response.content_part.done", item_id=self.msg_id, output_index=index,
-                                      content_index=0, part=_text_part(self.text)))
-            events.append(self._event("response.output_item.done", output_index=index, item=done))
-            self.output.append(done)
+            events += self._delta("message", item.content)
+        events += self._close()
         for call in item.tool_calls:
             index = len(self.output)
             item_id = new_id("fc_")

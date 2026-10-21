@@ -11,7 +11,7 @@ import threading
 from collections import deque
 from typing import Any, AsyncIterator, Deque, Dict, Iterator, List, Optional
 
-from .backends import RunSpec, get_backend
+from .backends import RunSpec, UnsupportedFlag, get_backend, mark_unsupported
 from .config import BridgeConfig
 from .errors import BridgeError
 
@@ -62,7 +62,27 @@ def _timeout_error(config: BridgeConfig) -> BridgeError:
 
 
 def run(spec: RunSpec, config: BridgeConfig) -> Iterator[Any]:
-    """Run the CLI for ``spec`` and yield TextDelta / ToolActivity / Final events."""
+    """Run the CLI for ``spec`` and yield TextDelta / ThinkingDelta / ToolActivity / Final events.
+
+    If the CLI rejects one of our optional flags, it is retried without that flag.
+    """
+    while True:
+        started = False
+        events = _run_once(spec, config)
+        try:
+            for event in events:
+                started = True
+                yield event
+            return
+        except UnsupportedFlag as exc:
+            if started or not mark_unsupported(exc):
+                raise
+            log.info("%s; retrying without it", exc)
+        finally:
+            events.close()  # stops the CLI if our consumer stopped early
+
+
+def _run_once(spec: RunSpec, config: BridgeConfig) -> Iterator[Any]:
     backend = get_backend(spec.backend, config)
     inv = backend.build(spec)
     parser = backend.parser()
@@ -115,6 +135,23 @@ def run(spec: RunSpec, config: BridgeConfig) -> Iterator[Any]:
 
 async def arun(spec: RunSpec, config: BridgeConfig) -> AsyncIterator[Any]:
     """Async version of :func:`run`."""
+    while True:
+        started = False
+        events = _arun_once(spec, config)
+        try:
+            async for event in events:
+                started = True
+                yield event
+            return
+        except UnsupportedFlag as exc:
+            if started or not mark_unsupported(exc):
+                raise
+            log.info("%s; retrying without it", exc)
+        finally:
+            await events.aclose()  # stops the CLI if our consumer stopped early
+
+
+async def _arun_once(spec: RunSpec, config: BridgeConfig) -> AsyncIterator[Any]:
     backend = get_backend(spec.backend, config)
     inv = backend.build(spec)
     parser = backend.parser()

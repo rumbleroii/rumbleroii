@@ -6,8 +6,11 @@
     clibridge.litellm.register()
     litellm.completion(model="claude-code/sonnet", messages=[{"role": "user", "content": "hi"}])
 
-Providers: ``claude-code``, ``claude-code-agent``, ``codex``, ``codex-agent``.
+Providers: ``clibridge``, ``claude-code``, ``claude-code-agent``, ``codex``, ``codex-agent``.
 The part after the slash is the CLI model (``default`` for the CLI's default).
+
+LiteLLM rejects ``reasoning_effort`` for custom providers, so set the thinking level
+with ``CLIBRIDGE_EFFORT`` or ``extra_body={"reasoning_effort": "high"}``.
 """
 
 from __future__ import annotations
@@ -20,13 +23,13 @@ from litellm.types.utils import ModelResponse
 
 from . import openai_api
 from .config import BridgeConfig
-from .core import ChatItem, aiter_chat, acomplete_chat, complete_chat, iter_chat
+from .core import ChatItem, Thinking, aiter_chat, acomplete_chat, complete_chat, iter_chat
 from .errors import BridgeError
 
-PROVIDERS = ("claude-code", "claude-code-agent", "codex", "codex-agent")
+PROVIDERS = ("clibridge", "claude-code", "claude-code-agent", "codex", "codex-agent")
 _PARAMS = ("tools", "tool_choice", "parallel_tool_calls", "response_format", "stop", "reasoning_effort",
            "functions", "function_call")
-_EXTRA = ("agent", "cwd", "max_turns")
+_EXTRA = ("agent", "cwd", "max_turns", "reasoning_effort")
 
 
 def _chunk(text: str = "", tool_use: Any = None, finish: str = "", usage: Any = None) -> Dict[str, Any]:
@@ -37,6 +40,8 @@ def _chunk(text: str = "", tool_use: Any = None, finish: str = "", usage: Any = 
 def _stream_chunks(item: ChatItem) -> List[Dict[str, Any]]:
     if isinstance(item, str):
         return [_chunk(item)]
+    if isinstance(item, Thinking):
+        return []  # generic chunks have no field for it; non-streaming replies carry reasoning_content
     chunks = []
     if item.content and not item.streamed:
         chunks.append(_chunk(item.content))

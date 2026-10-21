@@ -5,9 +5,10 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List
 
-from .core import ChatItem, ChatResult, new_id
+from .core import ChatItem, ChatResult, Thinking, new_id
 
 MODELS = [
+    "clibridge",
     "claude-code",
     "claude-code/fable",
     "claude-code/opus",
@@ -33,6 +34,7 @@ def usage(result: ChatResult) -> Dict[str, Any]:
         "completion_tokens": result.completion_tokens,
         "total_tokens": result.prompt_tokens + result.completion_tokens,
         "prompt_tokens_details": {"cached_tokens": result.cached_tokens},
+        "completion_tokens_details": {"reasoning_tokens": result.reasoning_tokens},
     }
 
 
@@ -45,6 +47,9 @@ def _tool_calls(result: ChatResult) -> List[Dict[str, Any]]:
 
 def completion(result: ChatResult, request: Dict[str, Any]) -> Dict[str, Any]:
     message: Dict[str, Any] = {"role": "assistant", "content": result.content, "refusal": None}
+    if result.reasoning:
+        # Same field DeepSeek, vLLM and LiteLLM use for thinking text.
+        message["reasoning_content"] = result.reasoning
     if result.tool_calls:
         message["tool_calls"] = _tool_calls(result)
     return {
@@ -81,7 +86,11 @@ class ChunkEncoder:
     def encode(self, item: ChatItem) -> List[Dict[str, Any]]:
         if isinstance(item, str):
             return [self._chunk({"content": item})]
+        if isinstance(item, Thinking):
+            return [self._chunk({"reasoning_content": item.text})]
         out = []
+        if item.reasoning and not item.reasoning_streamed:
+            out.append(self._chunk({"reasoning_content": item.reasoning}))
         if item.content and not item.streamed:
             out.append(self._chunk({"content": item.content}))
         if item.tool_calls:
